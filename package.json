@@ -1,6 +1,6 @@
 {
   "name": "react-native-richflyer",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "This is plugin that use RichFlyer.",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
