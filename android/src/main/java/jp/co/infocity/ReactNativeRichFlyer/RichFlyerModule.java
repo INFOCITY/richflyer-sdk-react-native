@@ -12,7 +12,6 @@ import com.facebook.react.bridge.LifecycleEventListener;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContext;
-import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
@@ -39,7 +38,7 @@ import jp.co.infocity.richflyer.history.RFContent;
 import jp.co.infocity.richflyer.util.RFResult;
 
 @ReactModule(name = RichFlyerModule.NAME)
-public class RichFlyerModule extends ReactContextBaseJavaModule {
+public class RichFlyerModule extends NativeRichflyerSpec {
   public static final String NAME = "RichFlyer";
 
   public RichFlyerModule(ReactApplicationContext reactContext) {
@@ -47,19 +46,6 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
   }
 
   @Override
-  @NonNull
-  public String getName() {
-    return NAME;
-  }
-
-
-  // Example method
-  // See https://reactnative.dev/docs/native-modules-android
-  @ReactMethod
-  public void multiply(double a, double b, Promise promise) {
-    promise.resolve(a * b);
-  }
-
   @ReactMethod
   public void initialize(ReadableMap readableMap, Promise promise) {
     boolean result = true;
@@ -115,6 +101,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     );
   }
 
+  @Override
   @ReactMethod
   public void registerSegments(ReadableMap stringSegments,
                                ReadableMap intSegments,
@@ -178,6 +165,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
       });
   }
 
+  @Override
   @ReactMethod
   public void getSegments(Promise promise) {
     Map<String,String> segments = RichFlyer.getSegments(getReactApplicationContext());
@@ -188,6 +176,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     promise.resolve(rnSegments);
   }
 
+  @Override
   @ReactMethod
   public void getReceivedNotifications(Promise promise) {
     ArrayList<RFContent> histories = RichFlyer.getHistory(getReactApplicationContext());
@@ -220,6 +209,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
       rnContent.putDouble("receivedDate", history.getReceivedDate());
       rnContent.putDouble("notificationDate", history.getNotificationDate());
       rnContent.putArray("actionButtons", rnButtons);
+      rnContent.putString("extendedProperty", history.getExtendedProperty());
 
       rnHistories.pushMap(rnContent);
     }
@@ -227,6 +217,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     promise.resolve(rnHistories);
   }
 
+  @Override
   @ReactMethod
   public void getLatestReceivedNotification(Promise promise) {
     RFContent content = RichFlyer.getLatestNotification(getReactApplicationContext());
@@ -258,10 +249,12 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     rnContent.putDouble("notificationDate", content.getNotificationDate());
     rnContent.putDouble("type", content.getContentType());
     rnContent.putArray("actionButtons", rnButtons);
+    rnContent.putString("extendedProperty", content.getExtendedProperty());
 
     promise.resolve(rnContent);
   }
 
+  @Override
   @ReactMethod
   public void showReceivedNotification(String notificationId, Promise promise) {
 
@@ -284,12 +277,14 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     RichFlyer.showHistoryNotification(getReactApplicationContext(), displayContent.getNotificationId());
   }
 
+  @Override
   @ReactMethod
   public void resetBadgeNumber(Promise promise) {
     // iOS用のメソッドなので何もしない
     promise.resolve(true);
   }
 
+  @Override
   @ReactMethod
   public void setForegroundNotification(boolean badge, boolean alert, boolean sound, Promise promise) {
     // iOS用のメソッドなので何もしない
@@ -327,12 +322,44 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     });
   }
 
+  // onNewIntent and onHostResume both call openNotification for the same
+  // physical tap (Android calls onResume right after onNewIntent), passing
+  // the same Intent instance. RichFlyer.parseAction() resolves the tap
+  // asynchronously (it looks up the notification's local content), so the
+  // second call can reach richFlyerAction(intent) before the first call's
+  // listener has fired and cleared the intent's extras -- and since the
+  // first lookup may complete before local content has finished syncing,
+  // that race produces a first event with no extendedProperty followed by a
+  // second, correct one a few ms later, instead of just one duplicate.
+  // Guarding by intent identity *before* calling parseAction (rather than by
+  // clearing extras inside its listener, after the async lookup returns)
+  // closes that race: the second call is skipped immediately regardless of
+  // how long the first lookup takes.
+  private Intent lastHandledNotificationIntent = null;
+
   private void openNotification(Intent intent) {
+    if (intent == null || intent == lastHandledNotificationIntent) {
+      return;
+    }
+
     if (RichFlyer.richFlyerAction(intent)) {
+      lastHandledNotificationIntent = intent;
       RichFlyer.parseAction(intent, new RFActionListener() {
         @Override
         public void onRFEventOnClickButton(@NonNull RFAction action, @NonNull String index) {
+          // Note: despite the parameter name, `index` here is RFAction's
+          // "notify_action" identifier string (e.g. "NotifyAction1"), not a
+          // numeric button position -- the Android SDK has no equivalent of
+          // iOS's RFAction.getIndex(). Not forwarded as "index" to avoid
+          // implying a numeric guarantee that doesn't hold on this platform.
 
+          // extendedProperty is intentionally not read/forwarded here: the
+          // action-button PendingIntent this SDK builds never carries an
+          // extended_property extra (confirmed by dumping the intent's
+          // extras on-device), unlike the "tap the notification body"
+          // intent handled by onRFEventOnClickStartApplication below, which
+          // does. This is a real difference in what the vendor SDK puts on
+          // each PendingIntent, not something recoverable from this intent.
           WritableNativeMap rnAtion = new WritableNativeMap();
           rnAtion.putString("notificationId", action.notificationId);
           rnAtion.putString("title", action.actionTitle);
@@ -340,9 +367,6 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
           rnAtion.putString("value", action.actionValue);
 
           sendEvent(getReactApplicationContext(), "RFOpenNotification", rnAtion);
-
-          intent.removeExtra("ActionId");
-          intent.removeExtra("ExtendedProperty");
         }
 
         @Override
@@ -355,20 +379,21 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
         }
       });
     }
-
   }
 
   private int listenerCount = 0;
 
 
+  @Override
   @ReactMethod
   public void addListener(String eventName) {
     listenerCount += 1;
   }
 
+  @Override
   @ReactMethod
-  public void removeListeners(Integer count) {
-    listenerCount -= count;
+  public void removeListeners(double count) {
+    listenerCount -= (int) count;
   }
   private void sendEvent(ReactContext reactContext, String eventName, @Nullable WritableMap params) {
     if (listenerCount > 0) {
@@ -376,8 +401,9 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     }
   }
 
+  @Override
   @ReactMethod
-  public void postMessage(ReadableArray events, ReadableMap variables, Integer standbyTime, Promise promise) {
+  public void postMessage(ReadableArray events, ReadableMap variables, double standbyTime, Promise promise) {
     ArrayList<String> rfEvents = new ArrayList<>();
     HashMap<String, String> rfVariables = new HashMap<>();
     Integer rfStandbyTime = null;
@@ -392,7 +418,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
       }
     }
     if (standbyTime >= 0) {
-      rfStandbyTime = standbyTime;
+      rfStandbyTime = (int) standbyTime;
     }
     RichFlyer.postMessage(rfEvents.toArray(new String[rfEvents.size()]), rfVariables, rfStandbyTime, getReactApplicationContext(), new RichFlyerPostingResultListener() {
         @Override
@@ -410,6 +436,7 @@ public class RichFlyerModule extends ReactContextBaseJavaModule {
     });
   }
 
+  @Override
   @ReactMethod
   public void cancelPosting(String eventPostId, Promise promise) {
     RichFlyer.cancelPosting(eventPostId, getReactApplicationContext(), new RichFlyerPostingResultListener() {

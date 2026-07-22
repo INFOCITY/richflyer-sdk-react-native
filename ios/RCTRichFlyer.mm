@@ -1,39 +1,74 @@
 #import "RCTRichFlyer.h"
+#import "RCTRichFlyerAppDelegateBridge.h"
 #import <React/RCTLog.h>
 #import <RichFlyer/RichFlyer.h>
 
 NSString* const foregroundNotificationSettingsKey = @"RFForegroundNotificationSettings";
 
+// A notification tap that cold-launches the app is delivered to whichever
+// RFNotificationDelegate is registered at that moment -- which, before JS
+// has run and this module's initialize() has registered *this* instance,
+// is the app's own AppDelegate (see appDelegateDidReceiveNotificationWithCenter:
+// below). activeRichFlyerInstance tracks the live module instance once it
+// exists; if a response arrives before that, it's held here and replayed
+// from addListener: once JS actually subscribes to RFOpenNotification.
+static UNNotificationResponse *pendingNotificationResponse = nil;
+static void (^pendingNotificationCompletionHandler)(void) = nil;
+static __weak RCTRichFlyer *activeRichFlyerInstance = nil;
+
 @implementation RCTRichFlyer
 RCT_EXPORT_MODULE()
 
-// Example method
-// See // https://reactnative.dev/docs/native-modules-ios
-RCT_EXPORT_METHOD(multiply:(double)a
-                  b:(double)b
-                  resolve:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
++ (void)appDelegateDidReceiveNotificationWithCenter:(UNUserNotificationCenter *)center
+                                            response:(UNNotificationResponse *)response
+                              withCompletionHandler:(void (^)(void))completionHandler
 {
-    NSNumber *result = @(a * b);
-
-    resolve(result);
+  RCTRichFlyer *instance = activeRichFlyerInstance;
+  if (instance) {
+    [instance rf_handleNotificationResponse:response withCompletionHandler:completionHandler];
+    return;
+  }
+  pendingNotificationResponse = response;
+  pendingNotificationCompletionHandler = completionHandler ?: ^{};
 }
 
-RCT_EXPORT_METHOD(initialize:(NSDictionary*)settings resolve:(RCTPromiseResolveBlock)resolve
-                    reject:(RCTPromiseRejectBlock)reject)
+- (instancetype)init
 {
-    NSNumber* result = [NSNumber numberWithBool:YES];
-    RCTLogInfo(@"initialize richflyer...");
-  
-  NSString* serviceKey = settings[@"serviceKey"];
-  NSString* groupId = settings[@"groupId"];
-  NSNumber* sandbox = settings[@"sandbox"];
-  NSDictionary* prompt = settings[@"prompt"];
-  NSArray* launchMode = settings[@"launchMode"];
+  if (self = [super init]) {
+    activeRichFlyerInstance = self;
+  }
+  return self;
+}
 
-  [RFApp setServiceKey:serviceKey appGroupId:groupId sandbox:[sandbox boolValue]];
+- (void)addListener:(NSString *)eventName
+{
+  [super addListener:eventName];
+  if ([eventName isEqualToString:@"RFOpenNotification"] && pendingNotificationResponse) {
+    UNNotificationResponse *response = pendingNotificationResponse;
+    void (^handler)(void) = pendingNotificationCompletionHandler;
+    pendingNotificationResponse = nil;
+    pendingNotificationCompletionHandler = nil;
+    [self rf_handleNotificationResponse:response withCompletionHandler:handler];
+  }
+}
+
+// Shared by both the old and new architecture entry points below; each one
+// just extracts serviceKey/groupId/sandbox/themeColor/launchMode/prompt from
+// its own argument shape and forwards here.
+- (void)rf_initializeWithServiceKey:(NSString *)serviceKey
+                             groupId:(NSString *)groupId
+                             sandbox:(BOOL)sandbox
+                          launchMode:(NSArray<NSString *> *)launchMode
+                         promptTitle:(nullable NSString *)promptTitle
+                       promptMessage:(nullable NSString *)promptMessage
+                         promptImage:(nullable NSString *)promptImage
+                             resolve:(RCTPromiseResolveBlock)resolve
+{
+  RCTLogInfo(@"initialize richflyer...");
+
+  [RFApp setServiceKey:serviceKey appGroupId:groupId sandbox:sandbox];
   [RFApp setRFNotificationDelegate:self];
-  
+
   int rfLaunchMode = RFLaunchModeNone;
   for (NSString* mode in launchMode) {
     if ([mode isEqual:@"Text"]) {
@@ -51,20 +86,19 @@ RCT_EXPORT_METHOD(initialize:(NSDictionary*)settings resolve:(RCTPromiseResolveB
   }
   [RFApp setLaunchMode:rfLaunchMode];
 
+  BOOL hasPrompt = promptTitle != nil || promptMessage != nil || promptImage != nil;
+
   // OSにプッシュ通知の受信許可をリクエスト
   dispatch_async(dispatch_get_main_queue(),
                  ^{
-    if (prompt) {
-      NSString* title = prompt[@"title"];
-      NSString* message = prompt[@"message"];
-      NSString* image = prompt[@"image"];
+    if (hasPrompt) {
       RFAlertController* alert = [[RFAlertController alloc] initWithApplication:[UIApplication sharedApplication]
-                                                                          title:title ? title : @""
-                                                                        message:message ? message: @""];
-      if (image) {
-        [alert addImage:image];
+                                                                          title:promptTitle ? promptTitle : @""
+                                                                        message:promptMessage ? promptMessage : @""];
+      if (promptImage) {
+        [alert addImage:promptImage];
       }
-      
+
       [alert present:^{
         [RFApp requestAuthorization:[UIApplication sharedApplication]
                                    applicationDelegate:[UIApplication sharedApplication].delegate];
@@ -73,13 +107,64 @@ RCT_EXPORT_METHOD(initialize:(NSDictionary*)settings resolve:(RCTPromiseResolveB
       [RFApp requestAuthorization:[UIApplication sharedApplication]
                                   applicationDelegate:[UIApplication sharedApplication].delegate];
     }
-    resolve(result);
+    resolve([NSNumber numberWithBool:YES]);
   });
 }
 
+#ifdef RCT_NEW_ARCH_ENABLED
+- (void)initialize:(JS::NativeRichflyer::SpecInitializeSettings &)settings
+            resolve:(RCTPromiseResolveBlock)resolve
+             reject:(RCTPromiseRejectBlock)reject
+{
+  NSMutableArray<NSString *> *launchMode = [NSMutableArray array];
+  if (auto launchModeVec = settings.launchMode()) {
+    for (NSString *mode : *launchModeVec) {
+      [launchMode addObject:mode];
+    }
+  }
+
+  NSString *promptTitle = nil;
+  NSString *promptMessage = nil;
+  NSString *promptImage = nil;
+  if (auto prompt = settings.prompt()) {
+    promptTitle = prompt->title();
+    promptMessage = prompt->message();
+    promptImage = prompt->image();
+  }
+
+  [self rf_initializeWithServiceKey:settings.serviceKey()
+                             groupId:settings.groupId()
+                             sandbox:settings.sandbox()
+                          launchMode:launchMode
+                         promptTitle:promptTitle
+                       promptMessage:promptMessage
+                         promptImage:promptImage
+                             resolve:resolve];
+}
+#else
+RCT_EXPORT_METHOD(initialize:(NSDictionary*)settings resolve:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString* serviceKey = settings[@"serviceKey"];
+  NSString* groupId = settings[@"groupId"];
+  NSNumber* sandbox = settings[@"sandbox"];
+  NSDictionary* prompt = settings[@"prompt"];
+  NSArray* launchMode = settings[@"launchMode"];
+
+  [self rf_initializeWithServiceKey:serviceKey
+                             groupId:groupId
+                             sandbox:[sandbox boolValue]
+                          launchMode:launchMode
+                         promptTitle:prompt[@"title"]
+                       promptMessage:prompt[@"message"]
+                         promptImage:prompt[@"image"]
+                             resolve:resolve];
+}
+#endif
+
 RCT_EXPORT_METHOD(registerSegments:(NSDictionary*)stringSegments
                   intSegments:(NSDictionary*)intSegments
-                  boolSegments:(NSDictionary*)boolSegments
+                  booleanSegments:(NSDictionary*)boolSegments
                   dateSegments:(NSDictionary*)dateSegments
                   resolve:(RCTPromiseResolveBlock)resolve
                     reject:(RCTPromiseRejectBlock)reject)
@@ -145,7 +230,8 @@ RCT_EXPORT_METHOD(getReceivedNotifications:(RCTPromiseResolveBlock)resolve
       @"imagePath" : content.imagePath ? [content.imagePath absoluteString] : @"",
       @"receivedDate" : [NSNumber numberWithLong:[content.receivedDate timeIntervalSince1970]],
       @"notificationDate" : [NSNumber numberWithLong:[content.notificationDate timeIntervalSince1970]],
-      @"actionButtons" : buttons
+      @"actionButtons" : buttons,
+      @"extendedProperty" : content.extendedProperty ? content.extendedProperty : @""
     };
     [rnHistories addObject:rnContent];
   }
@@ -184,7 +270,8 @@ RCT_EXPORT_METHOD(getLatestReceivedNotification:(RCTPromiseResolveBlock)resolve
     @"receivedDate" : [NSNumber numberWithLong:[content.receivedDate timeIntervalSince1970]],
     @"notificationDate" : [NSNumber numberWithLong:[content.notificationDate timeIntervalSince1970]],
     @"type" : [NSNumber numberWithUnsignedInteger:content.type],
-    @"actionButtons" : buttons
+    @"actionButtons" : buttons,
+    @"extendedProperty" : content.extendedProperty ? content.extendedProperty : @""
   };
   resolve(rnContent);
 
@@ -222,11 +309,15 @@ RCT_EXPORT_METHOD(showReceivedNotification:(NSString*)notificationId
 
         NSMutableDictionary* param = [NSMutableDictionary dictionary];
         if (action) {
+          param[@"notificationId"] = displayContent.notificationId ? displayContent.notificationId : @"";
           param[@"title"] = [action getTitle];
           param[@"type"] = [action getType];
           param[@"value"] = [action getValue];
+          if (displayContent.extendedProperty) {
+            param[@"extendedProperty"] = displayContent.extendedProperty;
+          }
         }
-        
+
         [rfDisplay dismiss];
         
         // JSにイベントを送信
@@ -270,13 +361,13 @@ RCT_EXPORT_METHOD(setForegroundNotification:(BOOL)badge
 
 RCT_EXPORT_METHOD(postMessage:(NSArray*)events
                   variables:(NSDictionary*)variables
-                  standbyTime:(nonnull NSNumber*)standbyTime
+                  standbyTime:(double)standbyTime
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
     NSNumber *rfStandbyTime = nil;
-    if ([standbyTime intValue] >= 0) {
-        rfStandbyTime = standbyTime;
+    if (standbyTime >= 0) {
+        rfStandbyTime = @(standbyTime);
     }
     [RFApp postMessage:events variables:variables standbyTime:rfStandbyTime 
         completion:^(RFResult * _Nonnull result, NSArray<NSString *> * _Nonnull eventPostIds) {
@@ -304,34 +395,45 @@ RCT_EXPORT_METHOD(cancelPosting:(NSString*)eventPostId
 
 #pragma mark - RFNotificationDelegate
 - (void)didReceiveNotificationWithCenter:(UNUserNotificationCenter *)center response:(UNNotificationResponse *)response withCompletionHandler:(void (^)())completionHandler {
+  [self rf_handleNotificationResponse:response withCompletionHandler:completionHandler];
+}
 
-  if (![RFApp isRichFlyerNotification:response.notification.request.content.userInfo]) {
-    return;
-  }
-  
-  [RFApp didReceiveNotification:response handler:^(RFAction *action, NSString* extendedProperty) {
-    
-    NSString* notificationId = RFLastNotificationInfo.identifier;
-        
-    NSMutableDictionary* param = [NSMutableDictionary dictionary];
-    param[@"notificationId"] = notificationId;
-    
-    if (action) {
-      param[@"title"] = [action getTitle];
-      param[@"type"] = [action getType];
-      param[@"value"] = [action getValue];
-    }
-    
-    if (extendedProperty) {
-      param[@"extendedProperty"] = extendedProperty;
+// Also called from addListener: (see above) to replay a notification tap
+// that cold-launched the app. That path -- and potentially this delegate
+// method itself -- isn't guaranteed to run on the main thread, but RFApp's
+// calls below require it, so hop to main first rather than assuming the
+// caller already did.
+- (void)rf_handleNotificationResponse:(UNNotificationResponse *)response withCompletionHandler:(void (^)(void))completionHandler {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (![RFApp isRichFlyerNotification:response.notification.request.content.userInfo]) {
+      completionHandler();
+      return;
     }
 
-    // JSにイベントを送信
-    [self sendEventWithName:@"RFOpenNotification" body:param];
-    
-  }];
-  
-  completionHandler();
+    [RFApp didReceiveNotification:response handler:^(RFAction *action, NSString* extendedProperty) {
+
+      NSString* notificationId = RFLastNotificationInfo.identifier;
+
+      NSMutableDictionary* param = [NSMutableDictionary dictionary];
+      param[@"notificationId"] = notificationId;
+
+      if (action) {
+        param[@"title"] = [action getTitle];
+        param[@"type"] = [action getType];
+        param[@"value"] = [action getValue];
+      }
+
+      if (extendedProperty) {
+        param[@"extendedProperty"] = extendedProperty;
+      }
+
+      // JSにイベントを送信
+      [self sendEventWithName:@"RFOpenNotification" body:param];
+
+    }];
+
+    completionHandler();
+  });
 }
 
 - (void)willPresentNotificationWithCenter:(UNUserNotificationCenter *)center notification:(UNNotification *)notification withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
@@ -362,6 +464,29 @@ RCT_EXPORT_METHOD(cancelPosting:(NSString*)eventPostId
 #pragma mark - RCTEventEmitter
 - (NSArray<NSString *> *)supportedEvents {
   return @[@"RFOpenNotification"];
+}
+
+#ifdef RCT_NEW_ARCH_ENABLED
+#pragma mark - TurboModule
+
+- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
+    (const facebook::react::ObjCTurboModule::InitParams &)params
+{
+  return std::make_shared<facebook::react::NativeRichflyerSpecJSI>(params);
+}
+#endif
+
+@end
+
+@implementation RCTRichFlyerAppDelegateBridge
+
++ (void)appDelegateDidReceiveNotificationWithCenter:(UNUserNotificationCenter *)center
+                                            response:(UNNotificationResponse *)response
+                              withCompletionHandler:(void (^)(void))completionHandler
+{
+  [RCTRichFlyer appDelegateDidReceiveNotificationWithCenter:center
+                                                    response:response
+                                       withCompletionHandler:completionHandler];
 }
 
 @end

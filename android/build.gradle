@@ -14,13 +14,13 @@ def isNewArchitectureEnabled() {
 }
 
 apply plugin: "com.android.library"
+// Applied unconditionally (not gated on isNewArchitectureEnabled()) so the
+// generated NativeRichflyerSpec class exists for RichFlyerModule to extend
+// regardless of which architecture the consuming app is built with.
+apply plugin: "com.facebook.react"
 
 
 def appProject = rootProject.allprojects.find { it.plugins.hasPlugin('com.android.application') }
-
-if (isNewArchitectureEnabled()) {
-  apply plugin: "com.facebook.react"
-}
 
 def getExtOrDefault(name) {
   return rootProject.ext.has(name) ? rootProject.ext.get(name) : project.properties["Richflyer_" + name]
@@ -97,10 +97,8 @@ dependencies {
   implementation 'com.google.firebase:firebase-messaging'
 }
 
-if (isNewArchitectureEnabled()) {
-  react {
-    jsRootDir = file("../src/")
-    libraryName = "RichFlyer"
-    codegenJavaPackageName = "jp.co.infocity.ReactNativeRichFlyer"
-  }
+react {
+  jsRootDir = file("../src/")
+  libraryName = "RNRichflyerSpec"
+  codegenJavaPackageName = "jp.co.infocity.ReactNativeRichFlyer"
 }
