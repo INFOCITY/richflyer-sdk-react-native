@@ -9,7 +9,11 @@ import Segments from './screen/Segments';
 import Received from './screen/Received';
 import Event from './screen/Event';
 import { SCREEN_NAME, ION_ICONS_NAME, LOG_MESSAGE } from './const/index';
-import { RichFlyer, RFLaunchMode, type RFAction } from 'react-native-richflyer';
+import {
+  RichFlyer,
+  RFLaunchMode,
+  type RFOpenNotificationEvent,
+} from 'react-native-richflyer';
 
 type TabBarIconArg = {
   color: string;
@@ -48,21 +52,42 @@ export default function App() {
 
   //通知開封時の処理を登録
   const openNotificationListener = () => {
-    richflyer.addOpenNotificationListener(async (action: RFAction) => {
-      if (action.extendedProperty) {
-        console.log(`${LOG_MESSAGE.EXTENDED_PROP}${action.extendedProperty}`);
-      }
-      const supported = await Linking.canOpenURL(action.value);
-      console.log(supported);
-      if (action.title && supported) {
-        console.log(
-          `${LOG_MESSAGE.ACTION}${action.title}\n${LOG_MESSAGE.VALUE}${action.value}\n${LOG_MESSAGE.TYPE}${action.type}`
+    richflyer.addOpenNotificationListener(
+      async (action: RFOpenNotificationEvent) => {
+        // 動作確認用: 通知開封イベントで受け取った値を画面上にそのまま表示する
+        console.log('RFOpenNotification event:', JSON.stringify(action));
+        Alert.alert(
+          'RFOpenNotification',
+          [
+            `notificationId: ${action.notificationId ?? '(なし)'}`,
+            `title: ${action.title ?? '(なし)'}`,
+            `type: ${action.type ?? '(なし)'}`,
+            `value: ${action.value ?? '(なし)'}`,
+            `extendedProperty: ${action.extendedProperty ?? '(なし)'}`,
+          ].join('\n')
         );
-        await Linking.openURL(action.value);
-      } else {
-        Alert.alert(`${LOG_MESSAGE.CANNOT_OPEN_URL}${action.value}`);
+
+        if (action.extendedProperty) {
+          console.log(`${LOG_MESSAGE.EXTENDED_PROP}${action.extendedProperty}`);
+        }
+
+        // action.valueはアクションボタンがタップされた場合のみ存在する
+        if (!action.value) {
+          return;
+        }
+
+        const supported = await Linking.canOpenURL(action.value);
+        console.log(supported);
+        if (action.title && supported) {
+          console.log(
+            `${LOG_MESSAGE.ACTION}${action.title}\n${LOG_MESSAGE.VALUE}${action.value}\n${LOG_MESSAGE.TYPE}${action.type}`
+          );
+          await Linking.openURL(action.value);
+        } else {
+          Alert.alert(`${LOG_MESSAGE.CANNOT_OPEN_URL}${action.value}`);
+        }
       }
-    });
+    );
   };
 
   React.useEffect(() => {

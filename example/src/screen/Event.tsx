@@ -57,7 +57,7 @@ export default function Segments() {
     richflyer
       .postMessage(rfEvents, rfVariables, rfStandbyTime)
       .then((result) => {
-        setPostMessageResult(result);
+        setPostMessageResult(result.join(', '));
         setEventPostIds(result);
         setPostMessageDialogOpen(true);
       })
