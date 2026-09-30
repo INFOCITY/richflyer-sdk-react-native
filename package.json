@@ -1,6 +1,6 @@
 {
   "name": "react-native-richflyer",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "This is plugin that use RichFlyer.",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
@@ -35,7 +35,7 @@
     }
   },
   "scripts": {
-    "example": "yarn workspace react-native-richflyer-example",
+    "example": "yarn workspace RichFlyerApp",
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
